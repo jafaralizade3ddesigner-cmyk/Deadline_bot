@@ -8,7 +8,7 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-SUPER_ADMIN_ID = int(os.environ.get("MANAGER_ID", "0"))  # مدیر اصلی
+SUPER_ADMIN_ID = int(os.environ.get("MANAGER_ID", "0"))
 DATA_FILE = "data.json"
 
 WAITING_NEW_DEADLINE = 1
@@ -36,15 +36,6 @@ def is_manager(user_id):
 def is_super_admin(user_id):
     return user_id == SUPER_ADMIN_ID
 
-def get_manager_info(user_id):
-    if user_id == SUPER_ADMIN_ID:
-        data = load_data()
-        u = data.get("users", {}).get(str(user_id), {})
-        return u.get("first_name", "مدیر اصلی")
-    data = load_data()
-    m = data.get("managers", {}).get(str(user_id), {})
-    return m.get("first_name", "مدیر")
-
 def register_user(user):
     data = load_data()
     if "users" not in data:
@@ -58,20 +49,22 @@ def register_user(user):
         "username": user.username or "",
         "joined_at": datetime.now().isoformat()
     }
-    # Update manager info too if they're a manager
-    if str(user.id) in data.get("managers", {}):
-        data["managers"][str(user.id)]["first_name"] = user.first_name
-        data["managers"][str(user.id)]["last_name"] = user.last_name or ""
-        data["managers"][str(user.id)]["username"] = user.username or ""
+    # Update manager record too if they're a manager
+    if uid in data.get("managers", {}):
+        data["managers"][uid].update({
+            "first_name": user.first_name,
+            "last_name": user.last_name or "",
+            "username": user.username or "",
+        })
     save_data(data)
     return is_new
 
 def get_all_users():
+    """All registered users INCLUDING managers (everyone can receive deadlines)"""
     data = load_data()
     users = data.get("users", {})
-    managers = data.get("managers", {})
-    # Exclude managers from member list
-    return {k: v for k, v in users.items() if k not in managers and int(k) != SUPER_ADMIN_ID}
+    # Exclude only the super admin from receiving deadlines
+    return {k: v for k, v in users.items() if int(k) != SUPER_ADMIN_ID}
 
 def get_deadline(deadline_id):
     return load_data()["deadlines"].get(str(deadline_id))
@@ -92,7 +85,7 @@ def persian_time_left(seconds):
 def manager_menu(is_super=False):
     rows = [
         [KeyboardButton("➕ ددلاین جدید"), KeyboardButton("👥 لیست کاربران")],
-        [KeyboardButton("📋 ددلاین‌های فعال"), KeyboardButton("❓ راهنما")]
+        [KeyboardButton("📋 ددلاین‌های فعال"), KeyboardButton("❓ راهنما")],
     ]
     if is_super:
         rows.append([KeyboardButton("👔 مدیران"), KeyboardButton("➕ افزودن مدیر")])
@@ -104,10 +97,24 @@ def member_menu():
         [KeyboardButton("❓ راهنما")]
     ], resize_keyboard=True)
 
+def cancel_keyboard():
+    return ReplyKeyboardMarkup([[KeyboardButton("🚫 لغو")]], resize_keyboard=True)
+
+# ─── Cancel ───────────────────────────────────────────────
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    context.user_data.clear()
+    await update.message.reply_text(
+        "❌ عملیات لغو شد.",
+        reply_markup=manager_menu(is_super=is_super_admin(user.id))
+    )
+    return ConversationHandler.END
+
 # ─── /start ───────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     is_new = register_user(user)
+    context.user_data.clear()  # Reset any stuck conversation
 
     if is_manager(user.id):
         await update.message.reply_text(
@@ -119,19 +126,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         if is_new:
-            # Notify all managers about new user
             data = load_data()
-            all_managers = list(data.get("managers", {}).keys()) + [str(SUPER_ADMIN_ID)]
-            for mid in all_managers:
+            all_manager_ids = [SUPER_ADMIN_ID] + [int(k) for k in data.get("managers", {}).keys()]
+            for mid in all_manager_ids:
                 try:
                     await context.bot.send_message(
-                        chat_id=int(mid),
+                        chat_id=mid,
                         text=f"🆕 *کاربر جدید ثبت شد!*\n\n👤 {user.first_name} {user.last_name or ''}\n🔗 @{user.username or '—'}\n🆔 `{user.id}`",
                         parse_mode="Markdown"
                     )
                 except:
                     pass
-
         await update.message.reply_text(
             f"👋 *سلام {user.first_name}!*\n\n"
             f"🆔 آیدی عددی تو:\n`{user.id}`\n\n"
@@ -160,54 +165,48 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await active_deadlines(update, context)
         elif text == "👔 مدیران" and is_super_admin(user.id):
             await list_managers(update, context)
-        elif text == "➕ افزودن مدیر" and is_super_admin(user.id):
-            await add_manager_start(update, context)
 
-# ─── Manager management ───────────────────────────────────
-async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_super_admin(update.effective_user.id):
-        return
-    data = load_data()
-    managers = data.get("managers", {})
-    if not managers:
-        await update.message.reply_text("📭 هنوز مدیری اضافه نشده.\nبا '➕ افزودن مدیر' مدیر جدید اضافه کن.")
-        return
-    text = f"👔 *مدیران ({len(managers)} نفر):*\n\n"
-    for mid, m in managers.items():
-        name = f"{m.get('first_name','')} {m.get('last_name','')}".strip()
-        un = f"@{m['username']}" if m.get('username') else "—"
-        text += f"👤 {name} | {un}\n🆔 `{m['id']}`\n\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
-
+# ─── Add manager conversation ─────────────────────────────
 async def add_manager_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_super_admin(update.effective_user.id):
-        return
+        return ConversationHandler.END
     await update.message.reply_text(
         "👔 *افزودن مدیر جدید*\n\n"
         "آیدی عددی مدیر جدید رو بنویس:\n\n"
-        "💡 اگه آیدیشو نداری، ازش بخواه توی ربات /myid بزنه.",
-        parse_mode="Markdown"
+        "💡 ازش بخواه توی ربات /myid یا 🆔 بزنه تا آیدیش رو بگیره.\n\n"
+        "برای لغو 🚫 بزن.",
+        parse_mode="Markdown",
+        reply_markup=cancel_keyboard()
     )
     return WAITING_ADD_MANAGER_ID
 
 async def add_manager_receive_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_super_admin(update.effective_user.id):
         return ConversationHandler.END
+
+    text = update.message.text.strip()
+
     try:
-        new_manager_id = int(update.message.text.strip())
+        new_manager_id = int(text)
     except ValueError:
-        await update.message.reply_text("❌ آیدی باید عدد باشه.")
+        await update.message.reply_text(
+            "❌ آیدی باید عدد باشه.\n\nدوباره وارد کن یا 🚫 بزن برای لغو:",
+            reply_markup=cancel_keyboard()
+        )
         return WAITING_ADD_MANAGER_ID
+
+    if new_manager_id == SUPER_ADMIN_ID:
+        await update.message.reply_text("⚠️ این آیدی مدیر اصلیه!", reply_markup=manager_menu(is_super=True))
+        return ConversationHandler.END
 
     data = load_data()
     if "managers" not in data:
         data["managers"] = {}
 
-    # Get user info if registered
     user_info = data.get("users", {}).get(str(new_manager_id), {})
     data["managers"][str(new_manager_id)] = {
         "id": new_manager_id,
-        "first_name": user_info.get("first_name", "مدیر"),
+        "first_name": user_info.get("first_name", f"مدیر {new_manager_id}"),
         "last_name": user_info.get("last_name", ""),
         "username": user_info.get("username", ""),
         "added_at": datetime.now().isoformat(),
@@ -221,18 +220,33 @@ async def add_manager_receive_id(update: Update, context: ContextTypes.DEFAULT_T
         parse_mode="Markdown",
         reply_markup=manager_menu(is_super=True)
     )
-
-    # Notify new manager
     try:
         await context.bot.send_message(
             chat_id=new_manager_id,
-            text=f"🎉 *تبریک!*\n\nتو توسط مدیر اصلی به عنوان *مدیر* تعیین شدی.\n\n/start بزن تا منوی مدیر ببینی.",
+            text="🎉 *تبریک!*\n\nتو به عنوان *مدیر* تعیین شدی.\n\n/start بزن تا منوی مدیر ببینی.",
             parse_mode="Markdown"
         )
     except:
         pass
-
     return ConversationHandler.END
+
+# ─── List managers ────────────────────────────────────────
+async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_super_admin(update.effective_user.id):
+        return
+    data = load_data()
+    managers = data.get("managers", {})
+    if not managers:
+        await update.message.reply_text("📭 هنوز مدیری اضافه نشده.\nاز '➕ افزودن مدیر' مدیر جدید اضافه کن.")
+        return
+    text = f"👔 *مدیران ({len(managers)} نفر):*\n\n"
+    keyboard = []
+    for mid, m in managers.items():
+        name = f"{m.get('first_name','')} {m.get('last_name','')}".strip()
+        un = f"@{m['username']}" if m.get('username') else "—"
+        text += f"👤 {name} | {un}\n🆔 `{m['id']}`\n\n"
+        keyboard.append([InlineKeyboardButton(f"🗑 حذف {name}", callback_data=f"remove_manager_{mid}")])
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def remove_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -249,19 +263,20 @@ async def remove_manager_callback(update: Update, context: ContextTypes.DEFAULT_
     else:
         await query.edit_message_text("❌ مدیر پیدا نشد.")
 
-# ─── Users list ───────────────────────────────────────────
+# ─── Users ────────────────────────────────────────────────
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_manager(update.effective_user.id):
         return
     users = get_all_users()
     if not users:
-        await update.message.reply_text("📭 هنوز کاربری ثبت نشده.")
+        await update.message.reply_text("📭 هنوز کاربری ثبت نشده.\nاز اعضا بخواه ربات رو /start کنن.")
         return
-    text = f"👥 *کاربران ثبت‌شده ({len(users)} نفر):*\n\n"
+    text = f"👥 *کاربران ({len(users)} نفر):*\n\n"
     for uid, u in users.items():
         name = f"{u['first_name']} {u.get('last_name','')}".strip()
         un = f"@{u['username']}" if u.get('username') else "—"
-        text += f"👤 {name} | {un}\n🆔 `{u['id']}`\n\n"
+        role = " 👔" if is_manager(int(uid)) else ""
+        text += f"👤 {name}{role} | {un}\n🆔 `{u['id']}`\n\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def my_deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -280,20 +295,25 @@ async def my_deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"📌 {d['title']}\n👔 از طرف: {manager_name}\n⏳ {persian_time_left(remaining)}\n\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# ─── New deadline ─────────────────────────────────────────
+# ─── New deadline conversation ────────────────────────────
 async def show_user_list_for_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_manager(update.effective_user.id):
         return
     users = get_all_users()
     if not users:
-        await update.message.reply_text("📭 هنوز کاربری ثبت نشده.\nاز اعضا بخواه ربات رو /start کنن.")
+        await update.message.reply_text("📭 هنوز کاربری ثبت نشده.")
         return
     keyboard = []
     for uid, u in users.items():
         name = f"{u['first_name']} {u.get('last_name','')}".strip()
         un = f" (@{u['username']})" if u.get('username') else ""
-        keyboard.append([InlineKeyboardButton(f"👤 {name}{un}", callback_data=f"select_user_{uid}")])
-    await update.message.reply_text("👥 *برای کدوم عضو ددلاین بفرستم؟*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        role = " 👔" if is_manager(int(uid)) else ""
+        keyboard.append([InlineKeyboardButton(f"👤 {name}{role}{un}", callback_data=f"select_user_{uid}")])
+    await update.message.reply_text(
+        "👥 *برای کدوم عضو ددلاین بفرستم؟*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def select_user_for_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -308,7 +328,10 @@ async def select_user_for_deadline(update: Update, context: ContextTypes.DEFAULT
         return
     context.user_data["selected_user_id"] = uid
     context.user_data["selected_user_name"] = user["first_name"]
-    await query.edit_message_text(f"📌 *ددلاین برای {user['first_name']}*\n\nعنوان ددلاین رو بنویس:", parse_mode="Markdown")
+    await query.edit_message_text(
+        f"📌 *ددلاین برای {user['first_name']}*\n\nعنوان ددلاین رو بنویس:\n\n/cancel برای لغو",
+        parse_mode="Markdown"
+    )
     return WAITING_DEADLINE_TITLE
 
 async def receive_deadline_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -316,7 +339,10 @@ async def receive_deadline_title(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
     context.user_data["deadline_title"] = update.message.text.strip()
     name = context.user_data.get("selected_user_name", "")
-    await update.message.reply_text(f"⏱ چند دقیقه مهلت برای *{name}*؟\n\nمثال: `30`", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"⏱ چند دقیقه مهلت برای *{name}*؟\n\nمثال: `30`\n\n/cancel برای لغو",
+        parse_mode="Markdown"
+    )
     return WAITING_DEADLINE_MINUTES
 
 async def receive_deadline_minutes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -334,6 +360,7 @@ async def receive_deadline_minutes(update: Update, context: ContextTypes.DEFAULT
     title = context.user_data["deadline_title"]
     name = context.user_data["selected_user_name"]
     manager = update.effective_user
+    context.user_data.clear()
     await send_deadline_to_user(update, context, target_id, minutes, title, manager)
     await update.message.reply_text(
         f"✅ ددلاین برای *{name}* ارسال شد!",
@@ -360,14 +387,12 @@ async def send_deadline_to_user(update, context, target_id, minutes, title, mana
     try:
         await context.bot.send_message(
             chat_id=target_id,
-            text=(
-                f"⏰ *ددلاین جدید!*\n\n"
-                f"📌 *عنوان:* {title}\n"
-                f"👔 *از طرف:* {manager_name}\n"
-                f"⏱ *زمان:* {minutes} دقیقه\n"
-                f"🕐 *مهلت تا:* {end_time.strftime('%H:%M:%S')}\n\n"
-                f"یادآوری‌های خودکار دریافت می‌کنی 👇"
-            ),
+            text=(f"⏰ *ددلاین جدید!*\n\n"
+                  f"📌 *عنوان:* {title}\n"
+                  f"👔 *از طرف:* {manager_name}\n"
+                  f"⏱ *زمان:* {minutes} دقیقه\n"
+                  f"🕐 *مهلت تا:* {end_time.strftime('%H:%M:%S')}\n\n"
+                  f"یادآوری‌های خودکار دریافت می‌کنی 👇"),
             parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
         )
         for pct, label in [(0.5, 50), (0.75, 75), (0.9, 90)]:
@@ -409,11 +434,10 @@ async def remind_user(context: ContextTypes.DEFAULT_TYPE):
     remaining = int((end_time - datetime.now()).total_seconds())
     pct = d["percent"]
     emoji = "🟡" if pct == 50 else ("🟠" if pct == 75 else "🔴")
-    manager_name = d.get("manager_name", "مدیر")
     keyboard = [[InlineKeyboardButton("⏸ درخواست تمدید", callback_data=f"delay_request_{d['deadline_id']}")]]
     await context.bot.send_message(
         chat_id=d["user_id"],
-        text=f"{emoji} *یادآوری*\n\n📌 {d['title']}\n👔 از طرف: {manager_name}\n⏱ {persian_time_left(remaining)} مانده!\n📊 {pct}% از زمان گذشته",
+        text=f"{emoji} *یادآوری*\n\n📌 {d['title']}\n👔 از طرف: {d.get('manager_name','مدیر')}\n⏱ {persian_time_left(remaining)} مانده!\n📊 {pct}% از زمان گذشته",
         parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -429,7 +453,6 @@ async def deadline_expired(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=d["user_id"],
         text=f"🚨 *ددلاین منقضی شد!*\n\n📌 {d['title']}\n👔 از طرف: {manager_name}\n⛔ زمان تموم شد.",
         parse_mode="Markdown")
-    # Notify the specific manager who sent it
     manager_id = d.get("manager_id", SUPER_ADMIN_ID)
     await context.bot.send_message(chat_id=manager_id,
         text=f"⚠️ *ددلاین منقضی شد*\n\n📌 {d['title']}\n👤 کاربر: `{d['user_id']}`\n🕐 {datetime.now().strftime('%H:%M:%S')}",
@@ -446,7 +469,7 @@ async def delay_request_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
     context.user_data["pending_deadline_id"] = deadline_id
     await query.edit_message_text(
-        f"📝 *درخواست تمدید*\n\n📌 {deadline['title']}\n\nچند دقیقه اضافه نیاز داری؟\nمثال: `15`",
+        f"📝 *درخواست تمدید*\n\n📌 {deadline['title']}\n\nچند دقیقه اضافه نیاز داری؟\nمثال: `15`\n\n/cancel برای لغو",
         parse_mode="Markdown"
     )
     return WAITING_NEW_DEADLINE
@@ -473,13 +496,11 @@ async def delay_receive_minutes(update: Update, context: ContextTypes.DEFAULT_TY
         InlineKeyboardButton(f"✅ تأیید +{extra} دقیقه", callback_data=f"approve_{deadline_id}"),
         InlineKeyboardButton("❌ رد", callback_data=f"reject_{deadline_id}")
     ]]
-    # Send to the manager who created this deadline
     manager_id = deadline.get("manager_id", SUPER_ADMIN_ID)
-    await context.bot.send_message(
-        chat_id=manager_id,
+    await context.bot.send_message(chat_id=manager_id,
         text=f"🔔 *درخواست تمدید*\n\n👤 {user.first_name} (`{user.id}`)\n📌 {deadline['title']}\n⏱ +{extra} دقیقه",
-        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    context.user_data.clear()
     await update.message.reply_text("✅ درخواستت ارسال شد! منتظر تأیید مدیر باش... 🕐")
     return ConversationHandler.END
 
@@ -509,9 +530,8 @@ async def approve_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name=f"expire_{deadline_id}")
     await query.edit_message_text(f"✅ تمدید تأیید شد\n📌 {deadline['title']}\n+{extra} دقیقه | مهلت جدید: {new_end.strftime('%H:%M:%S')}")
     keyboard = [[InlineKeyboardButton("⏸ درخواست تمدید", callback_data=f"delay_request_{deadline_id}")]]
-    manager_name = deadline.get("manager_name", "مدیر")
     await context.bot.send_message(chat_id=delay_req["user_id"],
-        text=f"🎉 *تمدید تأیید شد!*\n\n📌 {deadline['title']}\n👔 از طرف: {manager_name}\n+{extra} دقیقه\n🕐 {new_end.strftime('%H:%M:%S')}",
+        text=f"🎉 *تمدید تأیید شد!*\n\n📌 {deadline['title']}\n👔 از طرف: {deadline.get('manager_name','مدیر')}\n+{extra} دقیقه\n🕐 {new_end.strftime('%H:%M:%S')}",
         parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def reject_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -537,7 +557,6 @@ async def active_deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     data = load_data()
     manager_id = update.effective_user.id
-    # Each manager sees their own deadlines; super admin sees all
     if is_super_admin(manager_id):
         actives = {k: v for k, v in data["deadlines"].items() if v["status"] == "active"}
     else:
@@ -561,47 +580,57 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_super_admin(user.id):
         text = ("📖 *راهنمای مدیر اصلی:*\n\n"
-                "➕ *ددلاین جدید* — ارسال ددلاین به کاربر\n"
+                "➕ *ددلاین جدید* — ارسال ددلاین\n"
                 "👥 *لیست کاربران* — اعضای ثبت‌شده\n"
                 "📋 *ددلاین‌های فعال* — همه ددلاین‌ها\n"
-                "👔 *مدیران* — لیست مدیران\n"
-                "➕ *افزودن مدیر* — اضافه کردن مدیر جدید\n\n"
-                "💡 اعضا باید اول /start کنن.")
+                "👔 *مدیران* — لیست و حذف مدیران\n"
+                "➕ *افزودن مدیر* — مدیر جدید\n\n"
+                "💡 برای لغو هر عملیات /cancel بزن.")
     elif is_manager(user.id):
         text = ("📖 *راهنمای مدیر:*\n\n"
                 "➕ *ددلاین جدید* — ارسال ددلاین\n"
-                "👥 *لیست کاربران* — اعضای ثبت‌شده\n"
-                "📋 *ددلاین‌های فعال* — ددلاین‌های من")
+                "👥 *لیست کاربران* — اعضا\n"
+                "📋 *ددلاین‌های فعال* — ددلاین‌های من\n\n"
+                "💡 برای لغو هر عملیات /cancel بزن.")
     else:
         text = ("📖 *راهنما:*\n\n"
-                "🆔 *آیدی من* — نمایش آیدی برای دادن به مدیر\n"
+                "🆔 *آیدی من* — نمایش آیدی برای مدیر\n"
                 "⏱ *ددلاین‌های من* — ددلاین‌های فعال")
     await update.message.reply_text(text, parse_mode="Markdown")
+
+# ─── /myid command ────────────────────────────────────────
+async def myid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(f"🆔 آیدی عددی تو:\n\n`{user.id}`", parse_mode="Markdown")
 
 # ─── Main ─────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
+    cancel_filter = filters.Regex("^🚫 لغو$") | filters.COMMAND
+
     delay_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(delay_request_start, pattern="^delay_request_")],
         states={WAITING_NEW_DEADLINE: [MessageHandler(filters.TEXT & ~filters.COMMAND, delay_receive_minutes)]},
-        fallbacks=[]
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.Regex("^🚫 لغو$"), cancel)]
     )
     deadline_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(select_user_for_deadline, pattern="^select_user_")],
         states={
-            WAITING_DEADLINE_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_deadline_title)],
-            WAITING_DEADLINE_MINUTES: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_deadline_minutes)],
+            WAITING_DEADLINE_TITLE: [MessageHandler(filters.TEXT & ~cancel_filter, receive_deadline_title)],
+            WAITING_DEADLINE_MINUTES: [MessageHandler(filters.TEXT & ~cancel_filter, receive_deadline_minutes)],
         },
-        fallbacks=[]
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.Regex("^🚫 لغو$"), cancel)]
     )
     add_manager_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^➕ افزودن مدیر$"), add_manager_start)],
-        states={WAITING_ADD_MANAGER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_manager_receive_id)]},
-        fallbacks=[]
+        states={WAITING_ADD_MANAGER_ID: [MessageHandler(filters.TEXT & ~cancel_filter, add_manager_receive_id)]},
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.Regex("^🚫 لغو$"), cancel)]
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("myid", myid_cmd))
     app.add_handler(CommandHandler("send", send_deadline_cmd))
     app.add_handler(CommandHandler("active", active_deadlines))
     app.add_handler(CommandHandler("help", help_cmd))
