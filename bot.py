@@ -119,7 +119,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_manager(user.id):
         await update.message.reply_text(
             f"👋 *سلام {user.first_name}!*\n\n"
-            f"{'👑 مدیر اصلی' if is_super_admin(user.id) else '👔 مدیر'}\n\n"
+            f"{'👑 ادمین اصلی' if is_super_admin(user.id) else '👔 مدیر'}\n\n"
             f"از منوی پایین استفاده کن 👇",
             parse_mode="Markdown",
             reply_markup=manager_menu(is_super=is_super_admin(user.id))
@@ -140,7 +140,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"👋 *سلام {user.first_name}!*\n\n"
             f"🆔 آیدی عددی تو:\n`{user.id}`\n\n"
-            f"این عدد رو به مدیرت بفرست.\nاز منوی پایین استفاده کن 👇",
+            f"خوش اومدی.\nاز منوی پایین استفاده کن 👇",
             parse_mode="Markdown",
             reply_markup=member_menu()
         )
